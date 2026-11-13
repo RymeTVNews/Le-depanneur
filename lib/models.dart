@@ -33,6 +33,8 @@ class Pro {
   final double lat;
   final double lng;
   final bool demo;
+  final bool web; // trouvé sur Internet, non inscrit dans l'app
+  final String website;
 
   const Pro({
     required this.id,
@@ -48,6 +50,8 @@ class Pro {
     required this.lat,
     required this.lng,
     this.demo = false,
+    this.web = false,
+    this.website = '',
   });
 
   bool get isCompany => type == 'company';

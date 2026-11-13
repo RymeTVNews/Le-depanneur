@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'config.dart';
 import 'models.dart';
 import 'store.dart';
+import 'web_search.dart';
 
 // Position de repli (Montréal) si la localisation est refusée.
 const double _fallbackLat = 45.5017;
@@ -24,6 +25,11 @@ class _SearchPageState extends State<SearchPage> {
   double? _lng;
   bool _loading = false;
   String? _locMessage;
+  bool _useWeb = true;
+  bool _webLoading = false;
+  String? _webMessage;
+  List<Pro> _webPros = [];
+  int _webSeq = 0;
 
   @override
   void initState() {
@@ -53,6 +59,29 @@ class _SearchPageState extends State<SearchPage> {
       _lng = _fallbackLng;
     }
     if (mounted) setState(() => _loading = false);
+    _fetchWeb();
+  }
+
+  Future<void> _fetchWeb() async {
+    if (!_useWeb || _lat == null || _lng == null) {
+      if (mounted) setState(() => _webPros = []);
+      return;
+    }
+    final seq = ++_webSeq;
+    setState(() {
+      _webLoading = true;
+      _webMessage = null;
+    });
+    try {
+      final r = await searchWeb(_lat!, _lng!, category: _category);
+      if (mounted && seq == _webSeq) _webPros = r;
+    } catch (e) {
+      if (mounted && seq == _webSeq) {
+        _webPros = [];
+        _webMessage = '$e'.replaceFirst('Exception: ', '');
+      }
+    }
+    if (mounted && seq == _webSeq) setState(() => _webLoading = false);
   }
 
   Future<void> _refresh() async {
@@ -72,6 +101,10 @@ class _SearchPageState extends State<SearchPage> {
       ...widget.store.pros,
       if (kShowDemo) ...demoPros(_lat!, _lng!),
     ];
+    final known = all.map((p) => p.name.toLowerCase()).toSet();
+    for (final w in _webPros) {
+      if (!known.contains(w.name.toLowerCase())) all.add(w);
+    }
     final q = _query.text.trim().toLowerCase();
     final out = <_Result>[];
     for (final p in all) {
@@ -125,7 +158,10 @@ class _SearchPageState extends State<SearchPage> {
                     child: ChoiceChip(
                       label: Text(c),
                       selected: _category == c,
-                      onSelected: (s) => setState(() => _category = s ? c : null),
+                      onSelected: (s) {
+                        setState(() => _category = s ? c : null);
+                        _fetchWeb();
+                      },
                     ),
                   ),
               ],
@@ -137,7 +173,22 @@ class _SearchPageState extends State<SearchPage> {
               child: Text(_locMessage!,
                   style: TextStyle(color: Theme.of(context).colorScheme.error)),
             ),
-          if (_loading) const LinearProgressIndicator(),
+          SwitchListTile(
+            dense: true,
+            title: const Text('Inclure les entreprises trouvées sur Internet'),
+            value: _useWeb,
+            onChanged: (v) {
+              setState(() => _useWeb = v);
+              _fetchWeb();
+            },
+          ),
+          if (_webMessage != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(_webMessage!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            ),
+          if (_loading || _webLoading) const LinearProgressIndicator(),
           Expanded(
             child: results.isEmpty && !_loading
                 ? const Center(child: Text('Aucun professionnel trouvé.'))
@@ -191,13 +242,15 @@ class _ProTile extends StatelessWidget {
       title: Text(p.name),
       subtitle: Text(
           '${p.trade} • ${p.isCompany ? 'Entreprise' : 'Particulier'}'
-          '${p.demo ? ' • démo' : ''}'),
+          '${p.web ? ' • Internet' : ''}${p.demo ? ' • démo' : ''}'),
       trailing: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Text(formatKm(result.km),
               style: const TextStyle(fontWeight: FontWeight.bold)),
-          const Icon(Icons.verified, size: 18, color: Colors.green),
+          p.web
+              ? const Icon(Icons.public, size: 18, color: Colors.blueGrey)
+              : const Icon(Icons.verified, size: 18, color: Colors.green),
         ],
       ),
       onTap: () => Navigator.of(context).push(
@@ -248,10 +301,13 @@ class ProDetailPage extends StatelessWidget {
           const SizedBox(height: 12),
           Center(
             child: Chip(
-              avatar: const Icon(Icons.verified, color: Colors.green),
-              label: Text(pro.isCompany
-                  ? 'Entreprise vérifiée (nom, photo, numéro, adresse)'
-                  : 'Identité vérifiée (pièce d’identité, photo, numéro)'),
+              avatar: Icon(pro.web ? Icons.public : Icons.verified,
+                  color: pro.web ? Colors.blueGrey : Colors.green),
+              label: Text(pro.web
+                  ? 'Trouvé sur Internet (OpenStreetMap) — non vérifié'
+                  : pro.isCompany
+                      ? 'Entreprise vérifiée (nom, photo, numéro, adresse)'
+                      : 'Identité vérifiée (pièce d’identité, photo, numéro)'),
             ),
           ),
           if (pro.demo)
@@ -268,25 +324,39 @@ class ProDetailPage extends StatelessWidget {
           ),
           ListTile(
             leading: const Icon(Icons.phone),
-            title: Text(pro.phone),
-            trailing: FilledButton(
-              onPressed: () => _open(
-                  context, Uri(scheme: 'tel', path: pro.phone)),
-              child: const Text('Appeler'),
-            ),
+            title: Text(pro.phone.isEmpty ? 'Numéro non disponible' : pro.phone),
+            trailing: pro.phone.isEmpty
+                ? null
+                : FilledButton(
+                    onPressed: () =>
+                        _open(context, Uri(scheme: 'tel', path: pro.phone)),
+                    child: const Text('Appeler'),
+                  ),
           ),
-          if (pro.address.isNotEmpty)
+          if (pro.website.isNotEmpty)
             ListTile(
-              leading: const Icon(Icons.location_on),
-              title: Text(pro.address),
+              leading: const Icon(Icons.language),
+              title: Text(pro.website),
               trailing: OutlinedButton(
                 onPressed: () => _open(
                     context,
-                    Uri.parse(
-                        'geo:${pro.lat},${pro.lng}?q=${pro.lat},${pro.lng}(${Uri.encodeComponent(pro.name)})')),
-                child: const Text('Carte'),
+                    Uri.parse(pro.website.startsWith('http')
+                        ? pro.website
+                        : 'https://${pro.website}')),
+                child: const Text('Site'),
               ),
             ),
+          ListTile(
+            leading: const Icon(Icons.location_on),
+            title: Text(pro.address.isEmpty ? 'Adresse non disponible' : pro.address),
+            trailing: OutlinedButton(
+              onPressed: () => _open(
+                  context,
+                  Uri.parse(
+                      'geo:${pro.lat},${pro.lng}?q=${pro.lat},${pro.lng}(${Uri.encodeComponent(pro.name)})')),
+              child: const Text('Carte'),
+            ),
+          ),
           if (pro.description.isNotEmpty)
             ListTile(
               leading: const Icon(Icons.info_outline),

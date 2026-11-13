@@ -5,4 +5,4 @@ const String kSupabaseUrl = 'https://VOTRE-PROJET.supabase.co';
 const String kSupabaseAnonKey = 'VOTRE_CLE_ANON';
 
 // Affiche aussi des profils de démonstration autour de l'utilisateur.
-const bool kShowDemo = true;
+const bool kShowDemo = false;
