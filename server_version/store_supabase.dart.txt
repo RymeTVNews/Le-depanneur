@@ -1,0 +1,168 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:geolocator/geolocator.dart';
+
+import 'config.dart';
+import 'models.dart';
+import 'supa.dart';
+
+class LocError implements Exception {
+  final String message;
+  LocError(this.message);
+  @override
+  String toString() => message;
+}
+
+Future<Position> getPosition() async {
+  if (!await Geolocator.isLocationServiceEnabled()) {
+    throw LocError('Activez la localisation de votre téléphone.');
+  }
+  var perm = await Geolocator.checkPermission();
+  if (perm == LocationPermission.denied) {
+    perm = await Geolocator.requestPermission();
+  }
+  if (perm == LocationPermission.denied ||
+      perm == LocationPermission.deniedForever) {
+    throw LocError('Autorisation de localisation refusée.');
+  }
+  return Geolocator.getCurrentPosition(
+    locationSettings: const LocationSettings(
+      accuracy: LocationAccuracy.high,
+      timeLimit: Duration(seconds: 20),
+    ),
+  );
+}
+
+/// État de l'application, synchronisé avec Supabase.
+class AppStore extends ChangeNotifier {
+  static const trialDays = 7;
+  static const priceLabel = '5 \$ par an';
+
+  final Supa api = Supa();
+  String? _pendingEmail;
+  String? get email => api.email ?? _pendingEmail;
+  DateTime? trialStart;
+  DateTime? paidUntil;
+  List<Pro> pros = [];
+  bool ready = false;
+  String? startupError;
+
+  bool get configured =>
+      !kSupabaseUrl.contains('VOTRE-PROJET') && !kSupabaseAnonKey.contains('VOTRE_CLE');
+
+  bool get signedIn => api.signedIn;
+
+  Future<void> load() async {
+    if (!configured) {
+      ready = true;
+      return;
+    }
+    await api.loadSession();
+    if (api.signedIn) {
+      try {
+        await _loadProfile();
+      } catch (e) {
+        startupError = '$e';
+      }
+    }
+    ready = true;
+  }
+
+  Future<void> _loadProfile() async {
+    final rows = await api.select('profiles', 'select=trial_start,paid_until');
+    if (rows.isNotEmpty) {
+      trialStart = DateTime.tryParse('${rows.first['trial_start']}')?.toLocal();
+      paidUntil = DateTime.tryParse('${rows.first['paid_until'] ?? ''}')?.toLocal();
+    }
+  }
+
+  DateTime? get trialEnd => trialStart?.add(const Duration(days: trialDays));
+
+  bool get isPaid => paidUntil != null && paidUntil!.isAfter(DateTime.now());
+
+  bool get inTrial =>
+      !isPaid && trialEnd != null && trialEnd!.isAfter(DateTime.now());
+
+  int get trialDaysLeft {
+    if (trialEnd == null) return 0;
+    final h = trialEnd!.difference(DateTime.now()).inHours;
+    return h <= 0 ? 0 : (h / 24).ceil();
+  }
+
+  bool get hasAccess => signedIn && (isPaid || inTrial);
+
+  List<Pro> get mine => pros.where((p) => p.ownerId == api.userId).toList();
+
+  // --- Connexion par code envoyé par courriel ---
+
+  Future<void> sendCode(String e) async {
+    _pendingEmail = e.trim().toLowerCase();
+    await api.sendCode(_pendingEmail!);
+  }
+
+  Future<void> verifyCode(String code) async {
+    await api.verifyCode(_pendingEmail!, code.trim());
+    await _loadProfile();
+    notifyListeners();
+  }
+
+  Future<void> signOut() async {
+    await api.signOut();
+    trialStart = null;
+    paidUntil = null;
+    pros = [];
+    notifyListeners();
+  }
+
+  /// Paiement simulé pour la version de test.
+  Future<void> simulatePayment() async {
+    final until = DateTime.now().add(const Duration(days: 365));
+    await api.patch('profiles', 'user_id=eq.${api.userId}',
+        {'paid_until': until.toUtc().toIso8601String()});
+    paidUntil = until;
+    notifyListeners();
+  }
+
+  // --- Professionnels ---
+
+  Future<void> loadPros() async {
+    final rows = await api.select('pros', 'select=*&order=created_at.desc&limit=500');
+    pros = rows.map(Pro.fromRow).toList();
+    notifyListeners();
+  }
+
+  /// Envoie les images puis crée la fiche.
+  Future<void> addPro(Pro draft, {required String photoFile, String idFile = ''}) async {
+    final uid = api.userId!;
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final photoPath = '$uid/$stamp.jpg';
+    await api.upload('photos', photoPath, await File(photoFile).readAsBytes());
+    var idPath = '';
+    if (idFile.isNotEmpty) {
+      idPath = '$uid/$stamp.jpg';
+      await api.upload('ids', idPath, await File(idFile).readAsBytes());
+    }
+    final pro = Pro(
+      id: '',
+      type: draft.type,
+      name: draft.name,
+      trade: draft.trade,
+      phone: draft.phone,
+      address: draft.address,
+      description: draft.description,
+      photoPath: api.publicUrl('photos', photoPath),
+      idDocPath: idPath,
+      lat: draft.lat,
+      lng: draft.lng,
+    );
+    await api.insert('pros', pro.toRow());
+    await loadPros();
+  }
+
+  Future<void> removePro(String id) async {
+    await api.delete('pros', 'id=eq.$id');
+    pros.removeWhere((e) => e.id == id);
+    notifyListeners();
+  }
+}

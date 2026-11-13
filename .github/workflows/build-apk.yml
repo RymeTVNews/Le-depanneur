@@ -1,0 +1,52 @@
+name: Compiler l'APK Android
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Générer le dossier Android
+        run: flutter create --platforms=android --org com.ryme --project-name le_depanneur .
+
+      - name: Permissions et nom de l'application
+        run: python3 tool/patch_android.py
+
+      - run: flutter pub get
+
+      - name: Compiler l'APK
+        run: flutter build apk --release
+
+      - name: Renommer l'APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk le-depanneur-test.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: le-depanneur-apk
+          path: le-depanneur-test.apk
+
+      - name: Publier un lien de téléchargement
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: test-${{ github.run_number }}
+          name: Version de test ${{ github.run_number }}
+          files: le-depanneur-test.apk
+          prerelease: true

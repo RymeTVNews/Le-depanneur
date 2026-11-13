@@ -1,0 +1,19 @@
+name: le_depanneur
+description: Trouvez rapidement un professionnel ou un service de proximité.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  shared_preferences: ^2.3.0
+  geolocator: ^13.0.0
+  image_picker: ^1.1.2
+  url_launcher: ^6.3.0
+  path_provider: ^2.1.4
+
+flutter:
+  uses-material-design: true

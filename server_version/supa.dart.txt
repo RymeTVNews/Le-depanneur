@@ -1,0 +1,172 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'config.dart';
+
+class ApiError implements Exception {
+  final String message;
+  ApiError(this.message);
+  @override
+  String toString() => message;
+}
+
+/// Petit client REST pour Supabase (authentification par code courriel,
+/// base de données et stockage de fichiers).
+class Supa {
+  String? accessToken;
+  String? refreshToken;
+  String? userId;
+  String? email;
+  DateTime? expiresAt;
+
+  bool get signedIn => accessToken != null && userId != null;
+
+  Future<void> loadSession() async {
+    final p = await SharedPreferences.getInstance();
+    accessToken = p.getString('sb_access');
+    refreshToken = p.getString('sb_refresh');
+    userId = p.getString('sb_uid');
+    email = p.getString('sb_email');
+    expiresAt = DateTime.tryParse(p.getString('sb_exp') ?? '');
+  }
+
+  Future<void> _saveSession() async {
+    final p = await SharedPreferences.getInstance();
+    if (accessToken == null) {
+      for (final k in ['sb_access', 'sb_refresh', 'sb_uid', 'sb_exp', 'sb_email']) {
+        await p.remove(k);
+      }
+      return;
+    }
+    await p.setString('sb_access', accessToken!);
+    await p.setString('sb_refresh', refreshToken ?? '');
+    await p.setString('sb_uid', userId ?? '');
+    await p.setString('sb_email', email ?? '');
+    await p.setString('sb_exp', expiresAt?.toIso8601String() ?? '');
+  }
+
+  Map<String, String> _headers({bool auth = true, Map<String, String>? extra}) => {
+        'apikey': kSupabaseAnonKey,
+        'Authorization':
+            'Bearer ${auth && accessToken != null ? accessToken : kSupabaseAnonKey}',
+        'Content-Type': 'application/json',
+        ...?extra,
+      };
+
+  Never _fail(http.Response r) {
+    String msg = 'Erreur serveur (${r.statusCode})';
+    try {
+      final j = jsonDecode(r.body);
+      if (j is Map) {
+        msg = (j['msg'] ?? j['message'] ?? j['error_description'] ?? j['error'] ?? msg)
+            .toString();
+      }
+    } catch (_) {}
+    throw ApiError(msg);
+  }
+
+  void _readSession(Map<String, dynamic> j) {
+    accessToken = j['access_token'] as String?;
+    refreshToken = j['refresh_token'] as String?;
+    final user = j['user'];
+    if (user is Map) userId = user['id'] as String?;
+    final secs = (j['expires_in'] as num?)?.toInt() ?? 3600;
+    expiresAt = DateTime.now().add(Duration(seconds: secs));
+  }
+
+  Future<void> sendCode(String email) async {
+    final r = await http.post(
+      Uri.parse('$kSupabaseUrl/auth/v1/otp'),
+      headers: _headers(auth: false),
+      body: jsonEncode({'email': email, 'create_user': true}),
+    );
+    if (r.statusCode >= 300) _fail(r);
+  }
+
+  Future<void> verifyCode(String email, String code) async {
+    final r = await http.post(
+      Uri.parse('$kSupabaseUrl/auth/v1/verify'),
+      headers: _headers(auth: false),
+      body: jsonEncode({'type': 'email', 'email': email, 'token': code}),
+    );
+    if (r.statusCode >= 300) _fail(r);
+    _readSession(jsonDecode(r.body) as Map<String, dynamic>);
+    this.email = email;
+    await _saveSession();
+  }
+
+  Future<void> _refreshIfNeeded() async {
+    if (!signedIn || refreshToken == null || refreshToken!.isEmpty) return;
+    if (expiresAt != null &&
+        expiresAt!.isAfter(DateTime.now().add(const Duration(seconds: 60)))) {
+      return;
+    }
+    final r = await http.post(
+      Uri.parse('$kSupabaseUrl/auth/v1/token?grant_type=refresh_token'),
+      headers: _headers(auth: false),
+      body: jsonEncode({'refresh_token': refreshToken}),
+    );
+    if (r.statusCode >= 300) {
+      await signOut();
+      throw ApiError('Session expirée. Reconnectez-vous.');
+    }
+    _readSession(jsonDecode(r.body) as Map<String, dynamic>);
+    await _saveSession();
+  }
+
+  Future<void> signOut() async {
+    accessToken = null;
+    refreshToken = null;
+    userId = null;
+    email = null;
+    expiresAt = null;
+    await _saveSession();
+  }
+
+  Future<List<Map<String, dynamic>>> select(String table, String query) async {
+    await _refreshIfNeeded();
+    final r = await http.get(Uri.parse('$kSupabaseUrl/rest/v1/$table?$query'),
+        headers: _headers());
+    if (r.statusCode >= 300) _fail(r);
+    return (jsonDecode(r.body) as List).cast<Map<String, dynamic>>();
+  }
+
+  Future<void> insert(String table, Map<String, dynamic> row) async {
+    await _refreshIfNeeded();
+    final r = await http.post(Uri.parse('$kSupabaseUrl/rest/v1/$table'),
+        headers: _headers(extra: {'Prefer': 'return=minimal'}),
+        body: jsonEncode(row));
+    if (r.statusCode >= 300) _fail(r);
+  }
+
+  Future<void> patch(String table, String filter, Map<String, dynamic> row) async {
+    await _refreshIfNeeded();
+    final r = await http.patch(Uri.parse('$kSupabaseUrl/rest/v1/$table?$filter'),
+        headers: _headers(extra: {'Prefer': 'return=minimal'}),
+        body: jsonEncode(row));
+    if (r.statusCode >= 300) _fail(r);
+  }
+
+  Future<void> delete(String table, String filter) async {
+    await _refreshIfNeeded();
+    final r = await http.delete(Uri.parse('$kSupabaseUrl/rest/v1/$table?$filter'),
+        headers: _headers());
+    if (r.statusCode >= 300) _fail(r);
+  }
+
+  Future<void> upload(String bucket, String path, Uint8List bytes) async {
+    await _refreshIfNeeded();
+    final r = await http.post(
+      Uri.parse('$kSupabaseUrl/storage/v1/object/$bucket/$path'),
+      headers: _headers(extra: {'Content-Type': 'image/jpeg'}),
+      body: bytes,
+    );
+    if (r.statusCode >= 300) _fail(r);
+  }
+
+  String publicUrl(String bucket, String path) =>
+      '$kSupabaseUrl/storage/v1/object/public/$bucket/$path';
+}
